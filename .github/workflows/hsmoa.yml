@@ -1,0 +1,24 @@
+name: HSMOA → Slack (09:00 KST)
+
+on:
+  schedule:
+    # 09:00 KST == 00:00 UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright requests
+      - run: python -m playwright install --with-deps chromium
+      - name: Post filtered HSMOA schedule
+        run: python hsmoa_to_slack.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          HSMOA_SHOP: ${{ secrets.HSMOA_SHOP }}           # 예: 롯데홈쇼핑
+          HSMOA_CATEGORY: ${{ secrets.HSMOA_CATEGORY }}   # 예: 언더웨어
