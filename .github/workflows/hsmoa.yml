@@ -20,5 +20,9 @@ jobs:
         run: python hsmoa_to_slack.py
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          HSMOA_SHOP: ${{ secrets.HSMOA_SHOP }}           # 예: 롯데홈쇼핑
-          HSMOA_CATEGORY: ${{ secrets.HSMOA_CATEGORY }}   # 예: 언더웨어
+          # 텍스트 클릭은 안 쓰면 비워둬도 됨
+          HSMOA_SHOP: ${{ secrets.HSMOA_SHOP }}
+          HSMOA_CATEGORY: ${{ secrets.HSMOA_CATEGORY }}
+          # ✅ 로고/아이콘 기반 필터만 사용
+          HSMOA_SHOP_LOGO: ${{ secrets.HSMOA_SHOP_LOGO }}
+          HSMOA_CATEGORY_LOGO: ${{ secrets.HSMOA_CATEGORY_LOGO }}
