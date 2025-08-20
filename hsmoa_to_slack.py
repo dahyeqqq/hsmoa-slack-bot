@@ -2,143 +2,142 @@
 #   pip install playwright requests
 #   python -m playwright install --with-deps chromium
 import os, asyncio, datetime, re, requests
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from playwright.async_api import async_playwright
 
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
-# ✅ 필터: 텍스트/로고(alt) 둘 다 지원
-# - HSMOA_SHOP: 채널 이름이 화면에 텍스트로 있을 때(있으면 우선 사용)
-# - HSMOA_SHOP_LOGO: 로고 alt/title/aria-label 로 찾을 때 (정규식 패턴, | 로 구분)
-#   예) 롯데홈쇼핑이면 "롯데|LOTTE|LOTTEON"
-HSMOA_SHOP = os.environ.get("HSMOA_SHOP", "").strip()
-HSMOA_SHOP_LOGO = os.environ.get("HSMOA_SHOP_LOGO", "").strip()
-
-# - HSMOA_CATEGORY: 카테고리명이 텍스트일 때
-# - HSMOA_CATEGORY_LOGO: 카테고리 아이콘 alt/title/aria-label 로 찾을 때
-#   예) 의류: "의류|패션"
-HSMOA_CATEGORY = os.environ.get("HSMOA_CATEGORY", "").strip()
-HSMOA_CATEGORY_LOGO = os.environ.get("HSMOA_CATEGORY_LOGO", "").strip()
-
-# (옵션) 후처리 키워드 필터: 타이틀에 키워드 포함 시만 남김 (정규식, | 구분)
-HSMOA_CATEGORY_KEYWORDS = os.environ.get("HSMOA_CATEGORY_KEYWORDS", "").strip()
+# 필터(텍스트/로고)
+HSMOA_SHOP = (os.environ.get("HSMOA_SHOP") or "").strip()
+HSMOA_SHOP_LOGO = (os.environ.get("HSMOA_SHOP_LOGO") or "").strip()
+HSMOA_CATEGORY = (os.environ.get("HSMOA_CATEGORY") or "").strip()
+HSMOA_CATEGORY_LOGO = (os.environ.get("HSMOA_CATEGORY_LOGO") or "").strip()
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
-TODAY_TXT = datetime.datetime.now(KST).strftime("%Y-%m-%d")
-
+TODAY = datetime.datetime.now(KST).strftime("%Y-%m-%d")
 BASE_URL = "https://hsmoa.com/"
 
-def clean(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+def clean(s): return re.sub(r"\s+", " ", s or "").strip()
 
-async def click_first(page, locator):
-    try:
-        await locator.first.click(timeout=2000)
-        return True
-    except Exception:
-        return False
+async def click_by_text_or_label(page, text:str=None, logo_pat:str=None):
+    ok = False
+    if text:
+        try:
+            await page.get_by_text(text, exact=False).first.click(timeout=2000)
+            ok = True
+        except: pass
+    if (not ok) and logo_pat:
+        pat = re.compile(logo_pat, re.I)
+        # img[alt]
+        for el in await page.locator("img[alt]").all():
+            alt = await el.get_attribute("alt") or ""
+            if pat.search(alt):
+                try: await el.click(timeout=2000); return True
+                except: pass
+        # [aria-label] / [title]
+        for el in await page.locator("[aria-label], [title]").all():
+            lab = (await el.get_attribute("aria-label")) or (await el.get_attribute("title")) or ""
+            if pat.search(lab):
+                try: await el.click(timeout=2000); return True
+                except: pass
+    return ok
 
-async def click_by_label_like(page, pattern: str):
-    """alt/title/aria-label 에 pattern(정규식) 들어간 첫 요소 클릭"""
-    if not pattern:
-        return False
-    pat = re.compile(pattern, re.I)
+async def auto_scroll(page, steps=6, wait_ms=400):
+    for _ in range(steps):
+        await page.mouse.wheel(0, 2000)
+        await page.wait_for_timeout(wait_ms)
 
-    # 1) 이미지 alt
-    for el in await page.locator("img[alt]").all():
-        alt = await el.get_attribute("alt") or ""
-        if pat.search(alt):
-            try:
-                await el.click(timeout=2000)
-                return True
-            except Exception:
-                pass
-
-    # 2) aria-label / title
-    for el in await page.locator("[aria-label], [title]").all():
-        label = (await el.get_attribute("aria-label")) or (await el.get_attribute("title")) or ""
-        if pat.search(label):
-            try:
-                await el.click(timeout=2000)
-                return True
-            except Exception:
-                pass
-    return False
-
-async def scrape_filtered_today():
+async def scrape():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox","--disable-blink-features=AutomationControlled"]
+        )
+        ctx = await browser.new_context(
+            locale="ko-KR",
+            timezone_id="Asia/Seoul",
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        )
+        page = await ctx.new_page()
+        page.set_default_timeout(20000)
+
         await page.goto(BASE_URL, wait_until="networkidle")
+        # 오늘 탭 클릭 시도
+        try: await page.get_by_text("오늘", exact=False).first.click(timeout=1500)
+        except: pass
 
-        # '오늘' 탭 보장 (있으면 클릭)
-        await click_first(page, page.get_by_text("오늘"))
+        # 홈쇼핑사/카테고리 클릭(텍스트 → 로고 순서)
+        await click_by_text_or_label(page, HSMOA_SHOP, HSMOA_SHOP_LOGO)
+        await click_by_text_or_label(page, HSMOA_CATEGORY, HSMOA_CATEGORY_LOGO)
 
-        # --- 홈쇼핑사 선택: 텍스트 → 로고 순서 ---
-        if HSMOA_SHOP:
-            ok = await click_first(page, page.get_by_text(HSMOA_SHOP))
-            if not ok and HSMOA_SHOP_LOGO:
-                await click_by_label_like(page, HSMOA_SHOP_LOGO)
-        elif HSMOA_SHOP_LOGO:
-            await click_by_label_like(page, HSMOA_SHOP_LOGO)
-
-        # --- 카테고리 선택: 텍스트 → 로고 순서 ---
-        if HSMOA_CATEGORY:
-            ok = await click_first(page, page.get_by_text(HSMOA_CATEGORY))
-            if not ok and HSMOA_CATEGORY_LOGO:
-                await click_by_label_like(page, HSMOA_CATEGORY_LOGO)
-        elif HSMOA_CATEGORY_LOGO:
-            await click_by_label_like(page, HSMOA_CATEGORY_LOGO)
-
-        # 로딩 안정화
+        # 로딩 + 스크롤로 DOM 채우기
         await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(800)
+        await auto_scroll(page, steps=8, wait_ms=500)
 
-        # 항목 추출
+        # 1차: 대표 셀렉터 후보들 순차 시도
+        selector_sets = [
+            "[data-testid='schedule-item']",
+            "li.schedule-item, li:has(.time)",
+            ".schedule-list .schedule-item, .list .item",
+            ".row:has(.time)"
+        ]
+        rows = []
+        for sel in selector_sets:
+            nodes = await page.locator(sel).all()
+            if nodes:
+                rows = nodes; break
+
         items = []
-        rows = await page.locator("[data-testid='schedule-item']").all()
-        if not rows:
-            rows = await page.locator("li:has(.time), .schedule-item, .row:has(.time)").all()
+        def add_item(t, title, ch, price):
+            t, title, ch, price = clean(t), clean(title), clean(ch), clean(price)
+            if not (t or title): return
+            # 홈쇼핑사 텍스트 필터
+            if HSMOA_SHOP and HSMOA_SHOP not in ch:
+                # 로고 패턴으로 보정
+                if HSMOA_SHOP_LOGO and not re.search(HSMOA_SHOP_LOGO, title, re.I):
+                    return
+            # 카테고리(로고만 쓴 경우엔 후처리 생략)
+            items.append({"time": t or "-", "title": title or "(상품명)", "channel": ch, "price": price})
 
-        # 후처리 정규식
-        logo_pat = re.compile(HSMOA_SHOP_LOGO, re.I) if HSMOA_SHOP_LOGO else None
-        cat_kw_pat = re.compile(HSMOA_CATEGORY_KEYWORDS, re.I) if HSMOA_CATEGORY_KEYWORDS else None
+        if rows:
+            for r in rows[:300]:
+                t = ""
+                title = ""
+                ch = ""
+                price = ""
+                try:
+                    if await r.locator(".time").count():   t = await r.locator(".time").inner_text()
+                    if await r.locator(".title").count():  title = await r.locator(".title").inner_text()
+                    if await r.locator(".channel").count():ch = await r.locator(".channel").inner_text()
+                    if await r.locator(".price").count():  price = await r.locator(".price").inner_text()
+                except: pass
+                add_item(t, title, ch, price)
 
-        for r in rows[:200]:
-            time_txt = clean(await r.locator(".time").inner_text()) if await r.locator(".time").count() else ""
-            title_txt = clean(await r.locator(".title").inner_text()) if await r.locator(".title").count() else ""
-            ch_txt = clean(await r.locator(".channel").inner_text()) if await r.locator(".channel").count() else ""
-            price_txt = clean(await r.locator(".price").inner_text()) if await r.locator(".price").count() else ""
-
-            # 홈쇼핑사 사후 필터 (채널 텍스트가 없으면 로고 패턴으로 보정)
-            if HSMOA_SHOP and HSMOA_SHOP not in ch_txt:
-                if not (logo_pat and logo_pat.search(title_txt)):
-                    continue
-
-            # 카테고리 사후 필터(옵션 키워드)
-            if cat_kw_pat and not cat_kw_pat.search(title_txt):
-                continue
-
-            if time_txt or title_txt:
-                items.append({
-                    "time": time_txt or "-",
-                    "title": title_txt or "(상품명)",
-                    "channel": ch_txt,
-                    "price": price_txt
-                })
+        # 2차: 최후 수단 — 시간 패턴으로 긁기 (예: 06:30)
+        if not items:
+            html = await page.content()
+            # 행 단위로 대충 나눔
+            for m in re.finditer(r"(\d{1,2}:\d{2}).{0,80}?<\/?[^>]*>([^<]{2,100})", html, re.S):
+                t = m.group(1)
+                title = clean(re.sub("<[^>]+>"," ", m.group(2)))
+                add_item(t, title, "", "")
 
         await browser.close()
         return items
 
 def build_text(items):
-    f = []
-    if HSMOA_SHOP or HSMOA_SHOP_LOGO: f.append(HSMOA_SHOP or HSMOA_SHOP_LOGO)
-    if HSMOA_CATEGORY or HSMOA_CATEGORY_LOGO: f.append(HSMOA_CATEGORY or HSMOA_CATEGORY_LOGO)
-    filt_txt = " · ".join(f) if f else "전체"
+    filt_parts = []
+    if HSMOA_SHOP or HSMOA_SHOP_LOGO: filt_parts.append(HSMOA_SHOP or HSMOA_SHOP_LOGO)
+    if HSMOA_CATEGORY or HSMOA_CATEGORY_LOGO: filt_parts.append(HSMOA_CATEGORY or HSMOA_CATEGORY_LOGO)
+    header = f"*{TODAY} 홈쇼핑모아 편성 – {' · '.join(filt_parts) if filt_parts else '전체'}*"
 
-    lines = [f"*{TODAY_TXT} 홈쇼핑모아 편성 – {filt_txt}*"]
+    lines = [header]
     if not items:
         lines.append("_데이터 없음(필터/셀렉터 확인 필요)_")
     else:
+        # 디버그 요약
+        sample = " | ".join([clean(i['title'])[:30] for i in items[:3]])
+        lines.append(f"_총 {len(items)}건 · 샘플: {sample}_")
         for e in items[:60]:
             price = f" · {e['price']}" if e.get("price") else ""
             ch = f"[{e['channel']}]" if e.get("channel") else ""
@@ -146,12 +145,18 @@ def build_text(items):
     return "\n".join(lines)
 
 def post_to_slack(text):
-    payload = {"text": text, "blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]}
-    r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=20)
-    r.raise_for_status()
+    try:
+        requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": text, "blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]},
+            timeout=20
+        ).raise_for_status()
+    except Exception as e:
+        print(f"[ERROR] Slack post failed: {e}")
 
 async def main():
-    items = await scrape_filtered_today()
+    items = await scrape()
+    print(f"[DEBUG] scraped items count = {len(items)}")
     post_to_slack(build_text(items))
 
 if __name__ == "__main__":
